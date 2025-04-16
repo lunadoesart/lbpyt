@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+
+"""
+LBytePy Transpiler
+----------------
+This module converts .lbp files to Python by processing indentation syntax.
+"""
+import os
+import logging
+import argparse
+import re
+from typing import Dict, Any, List, Tuple
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("lbpyt")
+
+class LBytePyError(Exception):
+    """Base class for all LBytePy exceptions."""
+    pass
+
+class NoClosingParenthesisError(LBytePyError):
+    """Raised when a line starts with '(' but doesn't end with ')'."""
+    def __init__(self, message: str, line_number: int = None):
+        self.message = message
+        self.line_number = line_number
+        super().__init__(f"{message}{f' at line {line_number}' if line_number else ''}")
+
+class InvalidDirectiveError(LBytePyError):
+    """Raised when a LBytePy directive is invalid."""
+    def __init__(self, message: str, line_number: int = None):
+        self.message = message
+        self.line_number = line_number
+        super().__init__(f"{message}{f' at line {line_number}' if line_number else ''}")
+
+class IndentationConfig:
+    """Configuration class for indentation settings."""
+    def __init__(self, indent_type: str = "spaces", indent_size: int = 4):
+        self.indent_type = indent_type
+        self.indent_size = indent_size
+        
+    def generate_indentation(self, level: int = 1) -> str:
+        """Generate indentation string based on configuration.
+        
+        Args:
+            level: Number of indentation levels to generate
+            
+        Returns:
+            str: The indentation string
+            
+        Raises:
+            ValueError: If indentation type is invalid
+        """
+        if self.indent_type == "spaces":
+            return " " * (self.indent_size * level)
+        elif self.indent_type == "tabs":
+            return "\t" * level
+        else:
+            raise ValueError(f"Invalid indentation type: {self.indent_type}")
+
+def process_directive(directive_line: str, line_number: int) -> Tuple[str, List[Tuple[str, str]]]:
+    """
+    Process a LBytePy directive line.
+    
+    Args:
+        directive_line: The line containing the directive
+        line_number: Line number for error reporting
+        
+    Returns:
+        Tuple[str, List[Tuple[str, str]]]: Directive type and list of (from, to) replacements
+        
+    Raises:
+        InvalidDirectiveError: If the directive is invalid
+    """
+    # Extract content between << and >>
+    match = re.search(r'<<\s*(.*?)\s*>>', directive_line)
+    if not match:
+        raise InvalidDirectiveError("Invalid directive format", line_number)
+    
+    directive_content = match.group(1).strip()
+    parts = directive_content.split()
+    
+    if not parts:
+        raise InvalidDirectiveError("Empty directive", line_number)
+    
+    directive_type = parts[0].lower()
+    
+    if directive_type == "alias":
+        if len(parts) != 3:
+            raise InvalidDirectiveError("Alias directive requires exactly 2 arguments", line_number)
+        
+        return directive_type, [(parts[1], parts[2])]
+    else:
+        raise InvalidDirectiveError(f"Unknown directive type: {directive_type}", line_number)
+
+def process_file(input_file: str, output_file: str = None, config: IndentationConfig = None) -> None:
+    """Process a LBP file and convert it to Python.
+    
+    Args:
+        input_file: Path to the input .lbp file
+        output_file: Path to the output .py file (defaults to input_file + '.py')
+        config: Indentation configuration object
+        
+    Raises:
+        FileNotFoundError: If input file doesn't exist
+        NoClosingParenthesisError: If parsing error occurs
+        InvalidDirectiveError: If a LBytePy directive is invalid
+    """
+    if not os.path.exists(input_file):
+        raise FileNotFoundError(f"Input file not found: {input_file}")
+        
+    if output_file is None:
+        output_file = f"{os.path.splitext(input_file)[0]}.py"
+        
+    if config is None:
+        config = IndentationConfig()
+    
+    logger.info(f"Converting {input_file} to {output_file}")
+    
+    # Dictionary to store aliases (original -> replacement)
+    aliases = {}
+    
+    try:
+        # First pass: collect all directives
+        with open(input_file, 'r') as f_in:
+            for line_number, line in enumerate(f_in, start=1):
+                line = line.strip()
+                
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    continue
+                    
+                # Process directives
+                if '<<' in line and '>>' in line:
+                    directive_type, replacements = process_directive(line, line_number)
+                    
+                    if directive_type == "alias":
+                        for original, replacement in replacements:
+                            aliases[original] = replacement
+                            logger.info(f"Added alias: '{original}' -> '{replacement}'")
+        
+        # Second pass: process the file with collected directives
+        with open(input_file, 'r') as f_in, open(output_file, 'w') as f_out:
+            for line_number, line in enumerate(f_in, start=1):
+                line = line.strip()
+                
+                # Skip empty lines, comments, and directives
+                if not line or line.startswith('#') or ('<<' in line and '>>' in line):
+                    continue
+                    
+                if line.startswith("("):
+                    if ")" not in line:
+                        raise NoClosingParenthesisError("No closing parenthesis found", line_number)
+                    
+                    # Process indentation syntax
+                    # Find the position of the last closing parenthesis
+                    closing_paren_pos = line.rfind(")")
+                    
+                    # Extract content between opening and closing parentheses
+                    inner_content = line[1:closing_paren_pos].strip()
+                    
+                    # Process indentation - count leading hyphens and handle whitespace
+                    leading_hyphens_count = len(inner_content) - len(inner_content.lstrip('-'))
+                    # Remove leading hyphens
+                    content = inner_content[leading_hyphens_count:].strip()
+                    
+                    # Apply aliases
+                    for original, replacement in aliases.items():
+                        # Use word boundaries to ensure we only replace whole words
+                        content = re.sub(r'\b' + re.escape(original) + r'\b', replacement, content)
+                    
+                    indentation = config.generate_indentation(leading_hyphens_count)
+                    processed_line = indentation + content
+                    
+                    # Write the processed line to output
+                    f_out.write(processed_line + "\n")
+                # Skip all other lines - don't write them to output
+        
+        logger.info(f"Successfully converted {input_file} to {output_file}")
+    except Exception as e:
+        logger.error(f"Error processing file {input_file}: {str(e)}")
+        raise
+
+def main():
+    """Main entry point for the LBytePy transpiler."""
+    parser = argparse.ArgumentParser(description="Convert LBytePy (.lbp) files to Python")
+    parser.add_argument("input", help="Input .lbp file")
+    parser.add_argument("-o", "--output", help="Output Python file (default: input file with .py extension)")
+    parser.add_argument("--indent-type", choices=["spaces", "tabs"], default="spaces", 
+                        help="Type of indentation to use (default: spaces)")
+    parser.add_argument("--indent-size", type=int, default=4,
+                        help="Number of spaces for each indentation level (default: 4)")
+    
+    args = parser.parse_args()
+    
+    try:
+        # Create configuration with defaults from args
+        config = IndentationConfig(
+            indent_type=args.indent_type,
+            indent_size=args.indent_size
+        )
+        
+        # Pass None for output_file if not specified, which will trigger the default behavior
+        output_file = args.output if args.output else None
+        process_file(args.input, output_file, config)
+    except Exception as e:
+        logger.error(str(e))
+        return 1
+    
+    return 0
+
+if __name__ == "__main__":
+    exit(main())
