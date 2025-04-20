@@ -1,2 +1,2 @@
 # lbpyt
-LunaByte Python Superset Transpiler
+LunaByte Python Transpiler
